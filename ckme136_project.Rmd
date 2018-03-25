@@ -1,0 +1,1393 @@
+---
+title: "ckme136_project"
+author: "Lorne Mach"
+date: "March 25, 2018"
+output:
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+# Load packages and functions
+```{r}
+#install.packages("factoextra")
+#install.packages("dplyr")
+#install.packages("DAAG")
+#install.packages("fpc")
+#install.packages("cluster")
+#install.packages("ggplot2")
+#install.packages("rlang")
+#install.packages("dbscan")
+#install.packages("miscTools")
+#install.packages("forecast")
+
+library(rlang)
+library(ggplot2) # Used by graph packages below
+library(corrplot) # Used for correlation visualization
+library(plyr)
+library(dplyr) # Used for group_by function
+library(MASS) # Used for AIC functions
+library(factoextra) # Used for cluster visualization and visualization of optimal cluster selection
+library(cluster) # Used for cluster analysis functions like clusGap and silhouette
+library(dbscan)
+library(forecast) # Used for the accuracy() function to calculate various statistics rmse, rsquared, mae for regression model analysis
+library(caret) #Used for leveraging cross fold validation for linear and random forest models
+
+# Input: teams dataframe, year to start searching for winning teams
+# Output: winning teams dataframe
+# Desc: Get winning teams starting from a specific year
+getWinningTeams <- function(teams,startYear) {
+  winningteams = teams[teams$year > startYear,]
+  winningteams = winningteams[winningteams$div_win == "Y" |
+                              winningteams$wc_win == "Y" | 
+                              winningteams$lg_win == "Y" | 
+                              winningteams$ws_win == "Y",]
+  
+  
+  return(winningteams)
+}
+
+# Input: fielding dataframe
+# Output: fielding dataframe without NA and a single primary position for a players
+# Desc: Players can play multiple positions on a baseball team, this function finds the primary position and also removes NAs
+getFieldingClean <- function(fielding) {
+
+  # Drop all rows with NA in po or a column
+  fielding_temp=fielding[!is.na(fielding$po) & !is.na(fielding$a),]
+  
+  # Players can play multiple positions
+  # The primary position of the player is the position where he has accumulated the most po and a
+  fielding_temp$po_a <- rowSums(fielding_temp[,c("po","a")])
+
+  fielding_clean=fielding_temp %>% group_by(year,player_id) %>% filter(po_a == max(po_a))
+
+  return(fielding_clean)
+}
+
+# Input: All dataframes that contain data relevant to batting
+# Output: Batting metrics of players from winning teams starting from a specific year and with a minimum number of at-bats(ab)
+# Desc: Get batting metrics of players from winning teams starting from a specific year and with a minimum number of at-bats(ab)
+getWinningBatters <- function(teams,woba,batting,fielding,salary,usatodaySalary,player,allstar,award,startYear, minAb)
+{
+  winningTeams=getWinningTeams(teams,startYear)
+  winningBatters=merge(winningTeams[,c("year","team_id")], batting, by=c("year","team_id"))
+  winningBatters=getBatters(woba,winningBatters,fielding,salary,usatodaySalary,player,allstar,award,startYear,minAb)
+  return(winningBatters)
+}  
+
+# Input: All dataframes that contain data relevant to batting
+# Output: Batting metrics of players from teams starting from a specific year and with a minimum number of at-bats(ab)
+# Desc: Get batting metrics of players from teams starting from a specific year and with a minimum number of at-bats(ab)
+getBatters <- function(woba,batting, fielding, salary, usatodaySalary,player, allstar,award,startYear, minAb)
+{
+  batters=merge(fielding[,c("player_id","pos","year","po", "a","e")],batting,by=c("player_id","year"))
+
+  batters=merge(salary[,c("year", "player_id", "salary")], batters,by=c("player_id","year"))
+  batters=merge(player[,c("player_id","debut","birth_year","name_first","name_last")],batters,by=c("player_id"))
+  batters=merge(allstar[,c("player_id","year","game_id")],batters,by=c("player_id","year"),all.y=TRUE)
+  batters=merge(award[,c("player_id","year","award_id")],batters,by=c("player_id","year"),all.y=TRUE)
+  batters$isAllStar=!is.na(batters$game_id)
+  batters$isAwardWinner=!is.na(batters$award_id)
+  batters$debut=as.Date(batters$debut)
+  batters$hasFreeAgentStatus=batters$year - as.numeric(format(batters$debut,"%Y")) >= 6
+  batters$age=batters$year - as.numeric(batters$birth_year)
+  batters$ageUnder25=(batters$year - as.numeric(batters$birth_year) < 25)
+  batters$age25to30=(batters$year - as.numeric(batters$birth_year) >=25) & 
+                    (batters$year - as.numeric(batters$birth_year) < 30)
+  batters$age30to35=(batters$year - as.numeric(batters$birth_year) >=30) & 
+                    (batters$year - as.numeric(batters$birth_year) < 35)
+  batters$age35to50=(batters$year - as.numeric(batters$birth_year) >=35)
+  batters=batters[which(batters$ab > minAb),]
+  batters=batters[which(batters$year > startYear),]
+  batters=batters[!duplicated(batters[c("player_id","year")]),]
+
+  batters=merge(usatodaySalary[,c("Year","Team","FirstName","LastName","Avg.Annual","UTSalary")],batters,by.x=c("Year","Team","FirstName","LastName"),by.y=c("year","team_id","name_first","name_last"),all.y=TRUE)
+
+  missingAvgAnnual=which(is.na(batters$Avg.Annual))
+  batters[missingAvgAnnual,]$Avg.Annual=batters[missingAvgAnnual,]$salary
+  
+  batters = merge(batters,woba[,c("Season","wBB","wHBP","w1B","w2B","w3B","wHR")],by.x=c("Year"),by.y=c("Season"))
+  batters$single=batters$h - batters$double - batters$triple - batters$hr
+  
+# woba statistic = (x1 * BB + x2 * HBP + x3 * 1B + x4 * 2B + x5 * 3B + x6 * HR)/(AB + BB + IBB + SF + HBP)
+# https://www.fangraphs.com/library/woba-as-a-gateway-statistic/
+  
+  batters$woba=(batters$wBB * batters$bb +
+                batters$wHBP * batters$hbp +
+                batters$w1B * batters$single +
+                batters$w2B * batters$double +
+                batters$w3B * batters$triple +
+                batters$wHR * batters$hr) / (batters$ab + batters$bb - batters$ibb + batters$sf + batters$hbp)
+
+
+  return(batters)
+}
+
+# Input: dataframe, features
+# Output: PCA results
+# Desc: Perform PCA on a set of features from a dataframe
+performPCA <- function(object,features) {
+  result=princomp(object[,features],cor=T)
+  return(result)
+}
+
+# Input: dataframe and features
+# Output: plot of the correlation between features in a dataframe
+# Desc: Plot of the correlation between features in a dataframe
+showBattersCorPlot <- function(batters,features) {
+  batters_corr=cor(batters[,features])
+  corrplot::corrplot(batters_corr,method="pie")
+  return(batters_corr)
+}
+
+# Input: dataframe and features
+# Desc: Show summary statistics and boxplots of features in a dataframe
+showSummaryStatistics <- function(batters, features) {
+  batters_temp=batters
+  result=sapply(batters_temp, function (x) if (is.numeric(x)) { 1 } else { 0 })
+  numeric_features=names(which(result==1))
+  par(mfrow = c(2,3))
+  for (feature in numeric_features)
+  {
+    boxplot(batters_temp[,c(feature)],main=feature)
+    print(feature)
+    print(summary(batters_temp[,c(feature)]))
+  }  
+  par(mfrow = c(1,1))
+}
+
+
+# Input: dataframe and features
+# Output: dataframe with outliers removed
+# Desc: Removes outliers from a dataframe
+removeOutliers <- function(batters, features) {
+  batters_temp=batters
+  for (feature in features)
+  {
+    result=summary(batters_temp[,c(feature)])
+    q3=result[5]
+    q1=result[2]
+    iqr=q3-q1
+    upper_fence=q3+(1.5*iqr)
+    lower_fence=q1-(1.5*iqr)
+    # print(batters_temp[which(batters_temp[,c(feature)] > upper_fence | 
+    #                            batters_temp[,c(feature)] < lower_fence),])
+    batters_temp=batters_temp[which(batters_temp[,c(feature)] < upper_fence & 
+                       batters_temp[,c(feature)] > lower_fence),]
+  }
+  return(batters_temp)
+}
+
+# Input: dataframe and features
+# Output: dataframe of outliers
+# Desc: Get outliers from a dataframe
+getOutliers <- function(batters, features) {
+  batters_temp=batters
+  for (feature in features)
+  {
+    result=summary(batters_temp[,c(feature)])
+    q3=result[5]
+    q1=result[2]
+    iqr=q3-q1
+    upper_fence=q3+(1.5*iqr)
+    lower_fence=q1-(1.5*iqr)
+    batters_temp=batters_temp[which(batters_temp[,c(feature)] > upper_fence | 
+                               batters_temp[,c(feature)] < lower_fence),]
+  }
+  return(batters_temp)
+}
+
+# Input: dataframe and features
+# Output: dataframe with outliers removed and replaced with upper fence values
+# Desc: Outliers cause issues with normalization, instead of removing them, substitute the outliers with upper fence values
+
+substituteOutliersWithUpperFence <- function(batters, features) {
+  batters_temp=batters
+  for (feature in features)
+  {
+    result=summary(batters_temp[,c(feature)])
+    q3=result[5]
+    q1=result[2]
+    iqr=q3-q1
+    upper_fence=q3+(1.5*iqr)
+    lower_fence=q1-(1.5*iqr)
+    batters_temp[which(batters_temp[,c(feature)] > upper_fence),c(feature)] = upper_fence
+    
+  }
+  return(batters_temp)
+}
+
+# Input: Model, dataframe, string name of observed value, string name of model
+# Output: Returns dataframe with absolute deviation and percent error of each prediction made for every row in the dataframe
+# Desc: Find the absolute deviation and percent error of each prediction made for every row in the dataframe
+getModelPredictionError<-function(model,actual,modelName,battersTemp) {
+  salary.pred.modelName=paste("salary.pred.",modelName,sep="")
+  pred.err.percent.modelName=paste("pred.err.percent.",modelName,sep="")
+  salary.absdev.modelName=paste("salary.absdev.",modelName,sep="")
+  
+  salary.predicted=predict(model,newdata=battersTemp)
+  battersTemp[,c(salary.pred.modelName)]=salary.predicted
+  battersTemp[,c(salary.absdev.modelName)]=abs(battersTemp[,c(actual)] - battersTemp[,c(salary.pred.modelName)])
+  battersTemp[,c(pred.err.percent.modelName)]=
+    abs(battersTemp[,c(salary.absdev.modelName)]/battersTemp[,c(actual)]) * 100
+  return(battersTemp)
+}
+
+# Input: cluster data
+# Desc: Show plot of silhouette method of choosing clusters
+showAvgSilhouette <- function(clusterData) {
+  avg_sil_values=""
+  k.values <- 2:10
+  for (k in k.values)
+  {
+    km.res <- kmeans(clusterData, centers = k, nstart = 25)
+    ss <- silhouette(km.res$cluster, dist(clusterData))
+    avg_sil_values[k-1]=mean(ss[, 3])
+  }
+  
+  plot(k.values, avg_sil_values,
+       type = "b", pch = 19, frame = FALSE, 
+       xlab = "Number of clusters K",
+       ylab = "Average Silhouettes")
+}
+
+
+# Input: dataframe and features
+# OUtput: normalized dataframe
+# Desc: REturns a normalized dataframe
+getScaledClusterData<-function(batters, pos, features) {
+
+  result=batters
+  if (pos != "ALL")
+  {  
+    result=batters[which(batters$pos==pos),features]
+  }
+  else
+  {
+    result=batters[which(batters$pos!="P"),features]
+  }  
+
+  row.names(result)=paste(result$player_id,result$Year,sep="")
+  
+  result=scale(substituteOutliersWithUpperFence(result[,c(-1,-2)],names(result[,c(-1,-2)])))
+  return(result)
+}
+
+# Input: cluster data
+# Desc: Show plots of elbow, silhouette, and gap statistic to help determine best cluster selection
+showOptimalClusters<-function(clusterData)
+{
+	set.seed(123)
+
+	# Elbow method
+	print(fviz_nbclust(clusterData, kmeans, method = "wss"))
+
+	# Silhoutte method
+  showAvgSilhouette(clusterData)
+
+	# Gap statistic
+	gap_stat <- clusGap(clusterData, FUN = kmeans, nstart = 25,K.max = 10, B = 10)
+	print(fviz_gap_stat(gap_stat))
+}
+
+# Desc: Show regression model statistics: "RMSE", "rsquared"","ME","RMSE","MAE","MPE","MAPE"
+modelSummary <- function (data, lev = NULL, model = NULL) {
+  mainStats <- postResample(data[, "pred"], data[, "obs"])
+  extraStats <- accuracy(data[, "pred"], data[, "obs"])
+  names(extraStats)=c("ME","RMSE","MAE","MPE","MAPE")
+  c(mainStats,extraStats)
+}
+
+visualModelOutliers<- function(model,pos,outlierFeature,salary.absdev.pred)
+{
+  model.outliers=getOutliers(model,outlierFeature)
+  freeagent=model.outliers[which(model.outliers$hasFreeAgentStatus==TRUE),salary.absdev.pred]
+nofa=model.outliers[which(model.outliers$hasFreeAgentStatus==FALSE),salary.absdev.pred]
+
+ View(model.outliers[which(model.outliers$hasFreeAgentStatus==TRUE),])
+ View(model.outliers[which(model.outliers$hasFreeAgentStatus==FALSE),])
+title=paste(pos," Position Salary Outliers (Actual-Predicted)",sep=" ")
+
+boxplot(list(freeagent,nofa),main=title,col=c("blue","green"),names=c("fa", "no-fa"),horizontal = TRUE)
+
+#  model.no.outliers=removeOutliers(model,outlierFeature)
+
+  remove=row.names(model.outliers[which(model.outliers$hasFreeAgentStatus==TRUE),])
+  model.no.outliers=model[!rownames(model) %in% remove,]
+  return(model.no.outliers)
+}
+
+visualAbsoluteDev<- function(model,pos,salary.absdev.pred)
+{
+#  model.outliers=getOutliers(model,err.percent)
+freeagent=model[which(model$hasFreeAgentStatus==TRUE),salary.absdev.pred]
+nofa=model[which(model$hasFreeAgentStatus==FALSE),salary.absdev.pred]
+  
+title=paste(pos," Position Salary (Actual - Predicted)",sep=" ")
+
+boxplot(list(freeagent,nofa),main=title,col=c("blue","green"),names=c("fa", "no-fa"),horizontal = TRUE)
+
+}
+
+
+# Desc: Perform stepwise AIC to determine best features for linear regression, using the best features, create a model and run cross validation
+# Output: Error of the regression model produced
+buildAndRunLinearModel<-function(fullModel,nullModel,responseVar,modelName,modelData,modelCtrlLM)
+{
+  full=fullModel
+  null=nullModel
+  sboth=stepAIC(null,direction="both",scope=list(upper=full,lower=null),trace=FALSE)
+  
+  modelFeatures=attr(sboth$terms,"term.labels")
+  model=train(modelData[,modelFeatures],modelData[,responseVar],method='lm',trControl=modelCtrlLM)
+  
+  print(summary(model$finalModel))
+  print(model)
+  
+  error=getModelPredictionError(model,responseVar,modelName,modelData)
+  return(error)
+}
+
+
+# Desc: Perform recursive feature elimination to determine best features for random forest regression, using the best features, create a model and run cross validation
+# Output: Error of the regression model produced
+buildAndRunRfModel<-function(responseVar,modelName,modelData,modelCtrlRF)
+{
+  control=rfeControl(functions=rfFuncs, method="cv", number=3)
+  result=rfe(modelData[,c(-1)],modelData[,responseVar],rfeControl=control)
+#  plot(result, type=c("g", "o"))
+  result$variables[which(result$variables[,3]==16 & result$variables[,4]=="Fold1"),"var"]
+  
+  result$variables[which(result$variables[,3]==16 & result$variables[,4]=="Fold2"),"var"]
+  
+  result$variables[which(result$variables[,3]==16 & result$variables[,4]=="Fold3"),"var"]
+
+  modelFeatures=result$variables[which(result$variables[,3]==16 & result$variables[,4]=="Fold3"),"var"]
+
+  model=train(modelData[,modelFeatures],modelData[,responseVar],method='rf', trControl=modelCtrlRF)
+  
+  print(modelFeatures)
+  print(model)
+  
+  error=getModelPredictionError(model,responseVar,modelName,modelData)
+  return(error)
+  
+}  
+
+
+# Load datasets into dataframes
+teams = read.csv("team.csv")
+batting = read.csv("batting.csv")
+pitching = read.csv("pitching.csv")
+fielding = read.csv("fielding.csv")
+salary = read.csv("salary.csv")
+usatodaySalary = read.csv("usatoday_salary2.csv")
+player = read.csv("player.csv")
+allstar = read.csv("all_star.csv")
+award = read.csv("player_award.csv")
+award = award[!duplicated(award[c("player_id","year")]),]
+woba = read.csv("woba.csv")
+
+fieldingClean=getFieldingClean(fielding)
+```
+
+#Get winning batters from 1985-2015
+```{r}
+winningBatters=getWinningBatters(teams,woba,batting,fieldingClean,salary,usatodaySalary,player,allstar,award,1984,100)
+```
+
+#1) Show summary statistics and boxplots for winningBatters dataframe (ie. players from playoff teams from 1985-2015 that have batted over 100 times)
+#2) Show correlation plot of winningBatters dataframe (ie. players from playoff teams from 1985-2015 that have batted over 100 times)
+```{r}
+showSummaryStatistics(winningBatters,names(winningBatters))
+
+features=c("Avg.Annual","g","ab","woba","r", "h", "double", "triple", "hr", "rbi", "sb","cs","bb","so","ibb","hbp", "sh","sf","g_idp","po","a","e","age")
+battersCor=showBattersCorPlot(winningBatters,features)
+```
+
+#1) Clustering will be performed with players rom playoff teams from 1985-2015 that have batted over 100 times) 
+#2) Define features for clustering, initialize data for clustering algorithms
+```{r}
+# Features for clustering (PCA)
+featuresForClustering=c("player_id","Year","g","ab","r", "h", "double", "triple", "hr", "rbi", "sb", "cs", "bb", "so", "ibb", "hbp", "sf","woba")
+
+# Get players by position for Kmeans and dbscan clustering, data will scaled/normalized before performing kmeans
+posAllClustering=getScaledClusterData(winningBatters,"ALL",featuresForClustering)
+posCClustering=getScaledClusterData(winningBatters,"C",featuresForClustering)
+pos1BClustering=getScaledClusterData(winningBatters,"1B",featuresForClustering)
+pos2BClustering=getScaledClusterData(winningBatters,"2B",featuresForClustering)
+posSSClustering=getScaledClusterData(winningBatters,"SS",featuresForClustering)
+pos3BClustering=getScaledClusterData(winningBatters,"3B",featuresForClustering)
+posOFClustering=getScaledClusterData(winningBatters,"OF",featuresForClustering)
+
+```
+
+#Kmeans Clustering for position of "All"
+```{r}
+# Show Optimal clusters
+showOptimalClusters(posAllClustering)
+
+# Based on clustering selection methods above and optimal clusters is "3"
+clusAll=kmeans(posAllClustering, centers=5,nstart=25)
+
+```
+
+#Dbscan Clustering for position of "All"
+```{r}
+dbClusAll=dbscan(posAllClustering[,c(-1,-2)],eps=2,minPts = 3)
+```
+
+# Kmeans clustering produces 4 clusters of "All"
+# *** Cluster 1: Top performers
+# *** Cluster 2: Above average with speed
+# *** Cluster 3: Backup or part time players
+# *** Cluster 4: Above average with power
+# *** Cluster 5: Average player
+
+# Density based clustering
+# *** Exceptional players are treated as noise
+# *** The far right of cluster 1 contains a cluster of players.  This corresponds to Cluster 1 from kmeans
+
+# From both kmeans and density based clustering, most of the players are backup are part time players
+```{r}
+# Unscale cluster centroids
+CentersAllTransformed <- t(apply(clusAll$centers, 1, function(r) r * attr(posAllClustering, 'scaled:scale') + attr(posAllClustering, 'scaled:center')))
+CentersAllTransformed
+# Visualize kmeans cluster
+clusAll$size
+fviz_cluster(clusAll,posAllClustering,labelsize=8)
+
+# Visualize dbscan cluster
+dbClusAll
+fviz_cluster(dbClusAll,posAllClustering[,c(-1,-2)],axes=c(1,2),geom="text",labelsize = 4,outlier.shape = 2)
+```
+
+# Boxplot of player salaries per cluster for pos "ALL"
+```{r}
+par(mfrow = c(2,3)) 
+boxplot(winningBatters[which(winningBatters$pos!="P"),][which(clusAll$cluster==1),c("Avg.Annual")],xlab="Salary Top Players",ylab="Salary",main="All")
+boxplot(winningBatters[which(winningBatters$pos!="P"),][which(clusAll$cluster==2),c("Avg.Annual")],xlab="Salary Above Average Players (+ Speed)",ylab="Salary",main="All")
+boxplot(winningBatters[which(winningBatters$pos!="P"),][which(clusAll$cluster==3),c("Avg.Annual")],xlab="Salary Backup Players",ylab="Salary",main="All")
+boxplot(winningBatters[which(winningBatters$pos!="P"),][which(clusAll$cluster==4),c("Avg.Annual")],xlab="Salary Average Players (+ Power)",ylab="Salary",main="All")
+boxplot(winningBatters[which(winningBatters$pos!="P"),][which(clusAll$cluster==5),c("Avg.Annual")],xlab="Salary Average Players",ylab="Salary",main="All")
+par(mfrow = c(1,1))
+```
+
+
+# Kmeans Clustering for position of "C"
+```{r}
+# Show Optimal clusters
+showOptimalClusters(posCClustering)
+
+# Based on clustering selection methods above and optimal clusters is "3"
+clusC=kmeans(posCClustering, centers=3,nstart=25)
+
+```
+
+# Dbscan Clustering for position of "C"
+```{r}
+dbClusC=dbscan(posCClustering[,c(-1,-2)],eps=2.15,minPts = 3.5)
+```
+
+# Kmeans clustering produces 3 clusters of "C"
+# *** Cluster 1: Backup or part time players
+# *** Cluster 2: Average players
+# *** Cluster 3: Top performers
+
+
+# Density based clustering
+# *** Exceptional players are treated as noise
+# *** The far right of cluster 1 contains a cluster of players.  This corresponds to Cluster 1 from kmeans
+
+# From both kmeans and density based clustering, most of the players are backup are part time players
+```{r}
+# Unscale cluster centroids
+CentersCTransformed <- t(apply(clusC$centers, 1, function(r) r * attr(posCClustering, 'scaled:scale') + attr(posCClustering, 'scaled:center')))
+CentersCTransformed
+# Visualize kmeans cluster
+clusC$size
+fviz_cluster(clusC,posCClustering,labelsize=8)
+
+# Visualize dbscan cluster
+dbClusC
+fviz_cluster(dbClusC,posCClustering[,c(-1,-2)],axes=c(1,2),geom="text",labelsize = 4,outlier.shape = 1)
+```
+
+# Boxplot of player salaries per cluster for pos "C"
+```{r}
+par(mfrow = c(2,3))
+boxplot(winningBatters[which(winningBatters$pos=="C"),][which(clusC$cluster==1),c("Avg.Annual")],xlab="Salary for Backup Players",ylab="Salary",main="C")
+boxplot(winningBatters[which(winningBatters$pos=="C"),][which(clusC$cluster==2),c("Avg.Annual")],xlab="Salary Average Players",ylab="Salary",main="C")
+boxplot(winningBatters[which(winningBatters$pos=="C"),][which(clusC$cluster==3),c("Avg.Annual")],xlab="Salary Top Players",ylab="Salary",main="C")
+par(mfrow = c(1,1))
+```
+
+# Kmeans Clustering for position of "1B"
+```{r}
+showOptimalClusters(pos1BClustering)
+
+clus1B=kmeans(pos1BClustering, centers=4,nstart=25)
+```
+
+# Dbscan Clustering for position of "1B"
+```{r}
+dbClus1B=dbscan(pos1BClustering[,c(-1,-2)],eps=2,minPts = 3)
+```
+
+# Kmeans clustering produces 4 clusters of "1B"
+# *** Cluster 1: Backup/part time or underachieving players
+# *** Cluster 2: Top players
+# *** Cluster 3: Average players
+# *** Cluster 4: Above average players
+
+# Density based clustering
+# *** Exceptional players are treated as noise
+```{r}
+Centers1BTransformed <- t(apply(clus1B$centers, 1, function(r) r * attr(pos1BClustering, 'scaled:scale') + attr(pos1BClustering, 'scaled:center')))
+Centers1BTransformed
+clus1B$size
+fviz_cluster(clus1B,pos1BClustering,labelsize=8)
+
+dbClus1B
+fviz_cluster(dbClus1B,pos1BClustering[,c(-1,-2)],axes=c(1,2),geom="text",labelsize = 4,outlier.shape = 2)
+
+```
+
+# Boxplot of player salaries per cluster for pos "1B"
+```{r}
+par(mfrow = c(2,3))
+boxplot(winningBatters[which(winningBatters$pos=="1B"),][which(clus1B$cluster==1),c("Avg.Annual")],xlab="Salary Backup Players",ylab="Salary",main="1B")
+boxplot(winningBatters[which(winningBatters$pos=="1B"),][which(clus1B$cluster==2),c("Avg.Annual")],xlab="Salary Top Players",ylab="Salary",main="1B")
+boxplot(winningBatters[which(winningBatters$pos=="1B"),][which(clus1B$cluster==3),c("Avg.Annual")],xlab="Salary Average Players",ylab="Salary",main="1B")
+boxplot(winningBatters[which(winningBatters$pos=="1B"),][which(clus1B$cluster==4),c("Avg.Annual")],xlab="Salary Above Average Players",ylab="Salary",main="1B")
+par(mfrow = c(1,1))
+```
+
+
+
+# Kmeans Clustering for position of "2B"
+```{r}
+showOptimalClusters(pos2BClustering)
+
+clus2B=kmeans(pos2BClustering, centers=4,nstart=25)
+
+```
+
+# Dbscan Clustering for position of "2B"
+```{r}
+dbClus2B=dbscan(pos2BClustering[,c(-1,-2)],eps=2,minPts = 3)
+```
+
+# Kmeans clustering produces 3 clusters of "2B"
+# *** Cluster 1: Backup, part time, or underachieving players
+# *** Cluster 2: Above average player
+# *** Cluster 3: Average players
+# *** Cluster 4: Top performers
+ 
+# Density based clustering
+# *** Exceptional players or above average players are treated as noise
+```{r}
+Centers2BTransformed <- t(apply(clus2B$centers, 1, function(r) r * attr(pos2BClustering, 'scaled:scale') + attr(pos2BClustering, 'scaled:center')))
+Centers2BTransformed
+clus2B$size
+fviz_cluster(clus2B,pos2BClustering,labelsize=8)
+
+dbClus2B
+fviz_cluster(dbClus2B,pos2BClustering[,c(-1,-2)],axes=c(1,2),geom="text",labelsize = 4,outlier.shape = 2)
+```
+
+# Boxplot of player salaries per cluster for pos "2B"
+```{r}
+par(mfrow = c(2,3))
+boxplot(winningBatters[which(winningBatters$pos=="2B"),][which(clus2B$cluster==1),c("Avg.Annual")],xlab="Salary Backup Players",ylab="Salary",main="2B")
+boxplot(winningBatters[which(winningBatters$pos=="2B"),][which(clus2B$cluster==2),c("Avg.Annual")],xlab="Salary Above Average Players",ylab="Salary",main="2B")
+boxplot(winningBatters[which(winningBatters$pos=="2B"),][which(clus2B$cluster==3),c("Avg.Annual")],xlab="Salary Average Players",ylab="Salary",main="2B")
+boxplot(winningBatters[which(winningBatters$pos=="2B"),][which(clus2B$cluster==4),c("Avg.Annual")],xlab="Salary Top Players",ylab="Salary",main="2B")
+par(mfrow = c(1,1))
+```
+
+
+
+# Kmeans Clustering for position of "3B"
+```{r}
+showOptimalClusters(pos3BClustering)
+
+clus3B=kmeans(pos3BClustering, centers=4,nstart=25)
+
+```
+
+# Dbscan Clustering for position of "3B"
+```{r}
+dbClus3B=dbscan(pos3BClustering[,c(-1,-2)],eps=2,minPts = 3)
+
+```
+
+# Kmeans clustering produces 5 clusters of "3B"
+# *** Cluster 1: Average players with speed
+# *** Cluster 2: Backup/part time players
+# *** Cluster 3: Average players
+# *** Cluster 4: Top players
+
+# Density based clustering produces 7 clusters and noise
+# *** Exceptional players are treated as noise 
+# *** Cluster 1 represent the average and part time players in kmeans cluster 2 and 3
+
+```{r}
+Centers3BTransformed <- t(apply(clus3B$centers, 1, function(r) r * attr(pos3BClustering, 'scaled:scale') + attr(pos3BClustering, 'scaled:center')))
+Centers3BTransformed
+clus3B$size
+fviz_cluster(clus3B,pos3BClustering,labelsize=8)
+
+dbClus3B
+fviz_cluster(dbClus3B,pos3BClustering[,c(-1,-2)],axes=c(1,2),geom="text",labelsize = 4,outlier.shape = 2)
+
+```
+
+# Boxplot of player salaries per cluster for pos "3B"
+```{r}
+par(mfrow = c(2,3))
+boxplot(winningBatters[which(winningBatters$pos=="3B"),][which(clus3B$cluster==1),c("Avg.Annual")],xlab="Salary Average Players (+Speed)",ylab="Salary",main="3B")
+boxplot(winningBatters[which(winningBatters$pos=="3B"),][which(clus3B$cluster==2),c("Avg.Annual")],xlab="Salary Backup Players",ylab="Salary",main="3B")
+boxplot(winningBatters[which(winningBatters$pos=="3B"),][which(clus3B$cluster==3),c("Avg.Annual")],xlab="Salary Average Players",ylab="Salary",main="3B")
+boxplot(winningBatters[which(winningBatters$pos=="3B"),][which(clus3B$cluster==4),c("Avg.Annual")],xlab="Salary Top Players",ylab="Salary",main="3B")
+par(mfrow = c(1,1))
+```
+
+
+
+
+# Kmeans Clustering for position of "SS"
+```{r}
+showOptimalClusters(posSSClustering)
+
+clusSS=kmeans(posSSClustering, centers=4,nstart=25)
+
+```
+
+# Dbscan Clustering for position of "SS"
+```{r}
+dbClusSS=dbscan(posSSClustering[,c(-1,-2)],eps=2,minPts = 3)
+
+```
+
+# Kmeans clustering produces 3 clusters of "SS"
+# *** Cluster 1: Average players
+# *** Cluster 2: Above average players
+# *** Cluster 3: Top performers
+# *** Cluster 4: Backup or part time players
+
+
+# Density based clustering
+# *** Exceptional players or above average are treated as noise
+```{r}
+CentersSSTransformed <- t(apply(clusSS$centers, 1, function(r) r * attr(posSSClustering, 'scaled:scale') + attr(posSSClustering, 'scaled:center')))
+CentersSSTransformed
+clusSS$size
+fviz_cluster(clusSS,posSSClustering,labelsize=8)
+
+dbClusSS
+fviz_cluster(dbClusSS,posSSClustering[,c(-1,-2)],axes=c(1,2),geom="text",labelsize = 4,outlier.shape = 2)
+
+```
+
+# Boxplot of player salaries per cluster for pos "SS"
+```{r}
+par(mfrow = c(2,3))
+boxplot(winningBatters[which(winningBatters$pos=="SS"),][which(clusSS$cluster==1),c("Avg.Annual")],xlab="Salary Average Players",ylab="Salary",main="SS")
+boxplot(winningBatters[which(winningBatters$pos=="SS"),][which(clusSS$cluster==2),c("Avg.Annual")],xlab="Salary Above Average Players",ylab="Salary",main="SS")
+boxplot(winningBatters[which(winningBatters$pos=="SS"),][which(clusSS$cluster==3),c("Avg.Annual")],xlab="Salary Top Players",ylab="Salary",main="SS")
+boxplot(winningBatters[which(winningBatters$pos=="SS"),][which(clusSS$cluster==4),c("Avg.Annual")],xlab="Salary Backup Players",ylab="Salary",main="SS")
+par(mfrow = c(1,1))
+```
+
+
+
+# Kmeans Clustering for position of "OF"
+```{r}
+showOptimalClusters(posOFClustering)
+
+clusOF=kmeans(posOFClustering, centers=5,nstart=25)
+```
+
+# Dbscan Clustering for position of "OF"
+```{r}
+dbClusOF=dbscan(posOFClustering[,c(-1,-2)],eps=1.95,minPts = 3)
+```
+
+# Kmeans clustering produces 5 clusters of "OF"
+# *** Cluster 1: Average player
+# *** Cluster 2: Backup, part time, or underachievers players
+# *** Cluster 3: Top performers
+# *** Cluster 4: Average player (with speed)
+# *** Cluster 5: Above average players
+
+
+# Density based clustering
+# *** Exceptional players, above average, and speedy players are treated as noise
+```{r}
+CentersOFTransformed <- t(apply(clusOF$centers, 1, function(r) r * attr(posOFClustering, 'scaled:scale') + attr(posOFClustering, 'scaled:center')))
+CentersOFTransformed
+clusOF$size
+fviz_cluster(clusOF,posOFClustering,labelsize=8)
+
+dbClusOF
+fviz_cluster(dbClusOF,posOFClustering[,c(-1,-2)],axes=c(1,2),geom="text",labelsize = 4,outlier.shape = 2)
+
+```
+
+# Boxplot of player salaries per cluster for pos "OF"
+```{r}
+par(mfrow = c(2,3))
+boxplot(winningBatters[which(winningBatters$pos=="OF"),][which(clusOF$cluster==1),c("Avg.Annual")],xlab="Salary Average Players",ylab="Salary",main="OF")
+boxplot(winningBatters[which(winningBatters$pos=="OF"),][which(clusOF$cluster==2),c("Avg.Annual")],xlab="Salary Backup Players",ylab="Salary",main="OF")
+boxplot(winningBatters[which(winningBatters$pos=="OF"),][which(clusOF$cluster==3),c("Avg.Annual")],xlab="Salary Top Players",ylab="Salary",main="OF")
+boxplot(winningBatters[which(winningBatters$pos=="OF"),][which(clusOF$cluster==4),c("Avg.Annual")],xlab="Salary Average Players (+ Speed)",ylab="Salary",main="OF")
+boxplot(winningBatters[which(winningBatters$pos=="OF"),][which(clusOF$cluster==5),c("Avg.Annual")],xlab="Salary Above Average Players",ylab="Salary",main="OF")
+par(mfrow = c(1,1))
+```
+
+
+# Setup cross folds verification for linear and random forest regression models
+```{r}
+# sETUP 10-fold crossvalidationf or lm models
+modelCtrlLM <- trainControl(method='cv', number=10,summaryFunction=modelSummary)
+
+# SETUP 5 fold crossvalidation for rf models (5 fold because rf takes a long time to run)
+modelCtrlRF <- trainControl(method='cv', number=5,summaryFunction=modelSummary)
+```
+
+# Setup and populate data frame for regression model analysis of all players
+```{r}
+regressionFeatures=c("Avg.Annual","Year","woba","pos","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
+
+posAllR=winningBatters[which(winningBatters$pos!="P"),]
+posAllR=posAllR[,regressionFeatures]
+posAllR$pos=factor(posAllR$pos,exclude=NA)
+```
+
+# Show boxplot of salaries and determine if there are outliers
+```{r}
+posAllR.removed.outliers=removeOutliers(posAllR,"Avg.Annual")
+
+boxplot(list(posAllR$Avg.Annual,posAllR.removed.outliers$Avg.Annual),xlab="Salary",names=c("All","Removed Outliers"),main="Salary of All (1985-2015)",horizontal=TRUE)
+```
+
+# Normal model for All players
+#   RMSE     Rsquared   ME        MAE      MPE       MAPE     
+#   3262775  0.5046987  3781.319  2313310  35.47043  317.4001 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(pAllModel1Error$pred.err.percent.pAllModel1) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.003   34.440   94.420  313.800  323.700 8208.000  
+```{r}
+full=lm(Avg.Annual~.,data=posAllR)
+null=lm(Avg.Annual~1,data=posAllR)
+pAllModel1Error=buildAndRunLinearModel(full,null,"Avg.Annual","pAllModel1",posAllR,modelCtrlLM)
+summary(pAllModel1Error$pred.err.percent.pAllModel1)
+```
+
+# With salary outliers removed for all players
+#   RMSE     Rsquared   ME        MAE      MPE        MAPE    
+#   1866542  0.4983523  -526.824  1432642  -24.40724  200.044 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(error.model.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.034   32.550   74.400  197.900  226.500 4854.000  
+```{r}
+full=lm(Avg.Annual~.,data=posAllR.removed.outliers)
+null=lm(Avg.Annual~1,data=posAllR.removed.outliers)
+error.model.posAllR.removed.outliers=buildAndRunLinearModel(full,null,"Avg.Annual","pAll.removed.outliers",posAllR.removed.outliers,modelCtrlLM)
+summary(error.model.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers)
+
+```
+
+# Random forest for all players
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    3115720  0.5697811  -40965.90  2013343  -165.1337  186.4659 
+#    9    2918662  0.6021904  -63870.48  1814543  -110.4661  134.3067 
+#   16    2934899  0.5972576  -63311.40  1815671  -106.9761  131.9021 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 9. 
+# > summary(pAllRfmodelError$pred.err.percent.pAllRfmodel) 
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max.  
+#    0.0154   11.1900   25.2300   56.4500   69.8200 1070.0000  
+```{r}
+pAllRfmodelError=buildAndRunRfModel("Avg.Annual","pAllRfmodel",posAllR,modelCtrlRF)
+summary(pAllRfmodelError$pred.err.percent.pAllRfmodel)
+
+```
+
+# rANDOM FOREST removed outliers for all players
+#   mtry  RMSE     Rsquared   ME         MAE      MPE         MAPE     
+#    2    1876963  0.5129914  -20300.04  1355609  -136.67975  159.5156 
+#    9    1795690  0.5365515  -26455.85  1239017   -99.33395  123.2886 
+#   16    1804260  0.5311841  -21214.53  1237537   -94.85463  119.7167 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 9. 
+# > summary(error.rf.model.posAllR.removed.outliers$pred.err.percent.pAll.rf.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#   0.0048  10.6800  23.6900  50.4700  64.5500 794.2000  
+```{r}
+error.rf.model.posAllR.removed.outliers=buildAndRunRfModel("Avg.Annual","pAll.rf.removed.outliers",posAllR.removed.outliers,modelCtrlRF)
+summary(error.rf.model.posAllR.removed.outliers$pred.err.percent.pAll.rf.removed.outliers)
+  
+  
+```
+
+# Populate data for catchers
+```{r}
+regressionFeatures=c("Avg.Annual","Year","woba","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
+posCR=winningBatters[which(winningBatters$pos=="C"),]
+posCR=posCR[,regressionFeatures]
+```
+
+# Show boxplot of salaries and determine if there are outliers
+```{r}
+posCR.removed.outliers=removeOutliers(posCR,"Avg.Annual")
+boxplot(list(posCR$Avg.Annual,posCR.removed.outliers$Avg.Annual),xlab="Salary",names=c("C","Removed Outliers"),main="Salary of C (1985-2015)",horizontal=TRUE)
+```
+
+# Normal model for catchers
+#   RMSE     Rsquared   ME        MAE      MPE       MAPE     
+#   2314594  0.5167817  3726.043  1628863  26.66264  266.1617 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(pCModel1Error$pred.err.percent.pCModel1) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.455   34.490  109.900  259.400  266.800 5496.000  
+```{r}
+full=lm(Avg.Annual~.,data=posCR)
+null=lm(Avg.Annual~1,data=posCR)
+pCModel1Error=buildAndRunLinearModel(full,null,"Avg.Annual","pCModel1",posCR,modelCtrlLM)
+summary(pCModel1Error$pred.err.percent.pCModel1)
+```
+
+# With salary outliers removed for catchers
+#   RMSE     Rsquared   ME        MAE     MPE        MAPE     
+#   1049067  0.4059886  8354.375  798137  -31.50746  122.6718 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(error.model.posCR.removed.outliers$pred.err.percent.pC.removed.outliers) 
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max.  
+#    0.0614   31.2000   62.4000  118.6000  154.5000 1808.0000  
+```{r}
+full=lm(Avg.Annual~.,data=posCR.removed.outliers)
+null=lm(Avg.Annual~1,data=posCR.removed.outliers)
+error.model.posCR.removed.outliers=buildAndRunLinearModel(full,null,"Avg.Annual","pC.removed.outliers",posCR.removed.outliers,modelCtrlLM)
+summary(error.model.posCR.removed.outliers$pred.err.percent.pC.removed.outliers)
+
+```
+
+# Random forest for catchers
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    2413951  0.4953062  -28468.04  1504535  -167.7582  190.1735 
+#    9    2240692  0.5602224  -52929.95  1371180  -136.0973  158.5622 
+#   16    2187894  0.5738195  -50625.89  1333821  -128.8662  151.8840 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 16. 
+# > summary(pCRfmodelError$pred.err.percent.pCRfmodel) 
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max.  
+#    0.0995   10.7200   22.8500   57.0700   58.1000 2244.0000  
+```{r}
+pCRfmodelError=buildAndRunRfModel("Avg.Annual","pCRfmodel",posCR,modelCtrlRF)
+summary(pCRfmodelError$pred.err.percent.pCRfmodel)
+
+```
+
+# rANDOM FOREST removed outliers for catchers
+#   mtry  RMSE     Rsquared   ME         MAE       MPE         MAPE     
+#    2    1151180  0.2930748  -2801.201  845520.7  -109.94985  134.5661 
+#    9    1121897  0.3150358  -6071.415  805970.2   -88.89415  114.2926 
+#   16    1122092  0.3147121  -3561.572  795732.3   -82.24680  108.6876 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 9. 
+# > summary(error.rf.model.posCR.removed.outliers$pred.err.percent.pC.rf.removed.outliers) 
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max.  
+#    0.1562   12.0100   23.4100   45.7900   55.6100 1026.0000  
+```{r}
+error.rf.model.posCR.removed.outliers=buildAndRunRfModel("Avg.Annual","pC.rf.removed.outliers",posCR.removed.outliers,modelCtrlRF)
+summary(error.rf.model.posCR.removed.outliers$pred.err.percent.pC.rf.removed.outliers)
+  
+  
+```
+
+
+
+# setup data for 1B players
+```{r}
+regressionFeatures=c("Avg.Annual","Year","woba","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
+pos1BR=winningBatters[which(winningBatters$pos=="1B"),]
+pos1BR=pos1BR[,regressionFeatures]
+```
+
+# Show boxplot of salaries and determine if there are outliers
+```{r}
+pos1BR.removed.outliers=removeOutliers(pos1BR,"Avg.Annual")
+boxplot(list(pos1BR$Avg.Annual,pos1BR.removed.outliers$Avg.Annual),xlab="Salary",names=c("All","Removed Outliers"),main="Salary of 1B (1985-2015)",horizontal=TRUE)
+```
+
+# Normal model for 1B
+#   RMSE     Rsquared   ME         MAE      MPE       MAPE     
+#   3893143  0.5164647  -158.9451  2905085  47.43024  391.6925 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(p1BModel1Error$pred.err.percent.p1BModel1) 
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  
+#    0.47   36.84   97.50  374.40  349.80 9865.00  
+```{r}
+full=lm(Avg.Annual~.,data=pos1BR)
+null=lm(Avg.Annual~1,data=pos1BR)
+p1BModel1Error=buildAndRunLinearModel(full,null,"Avg.Annual","p1BModel1",pos1BR,modelCtrlLM)
+summary(p1BModel1Error$pred.err.percent.p1BModel1)
+```
+
+# With salary outliers removed for 1B
+#   RMSE     Rsquared   ME        MAE      MPE        MAPE     
+#   2471295  0.4879897  12358.65  1900732  -11.51971  252.6585 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(error.model.pos1BR.removed.outliers$pred.err.percent.1B.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.239   32.790   81.510  241.600  276.400 6159.000  
+```{r}
+full=lm(Avg.Annual~.,data=pos1BR.removed.outliers)
+null=lm(Avg.Annual~1,data=pos1BR.removed.outliers)
+error.model.pos1BR.removed.outliers=buildAndRunLinearModel(full,null,"Avg.Annual","1B.removed.outliers",pos1BR.removed.outliers,modelCtrlLM)
+summary(error.model.pos1BR.removed.outliers$pred.err.percent.1B.removed.outliers)
+
+```
+
+# Random forest for 1B
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    3857420  0.5474452  -66393.70  2680325  -241.9065  264.9550 
+#    9    3395541  0.6408556  -82835.05  2304728  -180.4462  202.7582 
+#   16    3428451  0.6245384  -67236.27  2286221  -164.7468  188.1807 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 9. 
+# > summary(p1BRfmodelError$pred.err.percent.p1BRfmodel) 
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max.  
+#    0.0051   11.6300   28.6100   79.6600   88.4400 1012.0000  
+```{r}
+p1BRfmodelError=buildAndRunRfModel("Avg.Annual","p1BRfmodel",pos1BR,modelCtrlRF)
+summary(p1BRfmodelError$pred.err.percent.p1BRfmodel)
+
+```
+
+# rANDOM FOREST removed outliers for 1B
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    2605671  0.4577912  -30563.71  1875753  -193.7624  216.6985 
+#    9    2466527  0.5007996  -35342.91  1729828  -152.0031  174.6840 
+#   16    2465291  0.4963060  -22642.68  1702055  -137.4516  160.9274 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 16. 
+# > summary(error.rf.model.pos1BR.removed.outliers$pred.err.percent.p1B.rf.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#   0.0183  11.3800  28.2800  64.7200  74.2400 911.6000  
+```{r}
+error.rf.model.pos1BR.removed.outliers=buildAndRunRfModel("Avg.Annual","p1B.rf.removed.outliers",pos1BR.removed.outliers,modelCtrlRF)
+summary(error.rf.model.pos1BR.removed.outliers$pred.err.percent.p1B.rf.removed.outliers)
+  
+  
+```
+
+# setup data for 2B players
+```{r}
+regressionFeatures=c("Avg.Annual","Year","woba","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
+pos2BR=winningBatters[which(winningBatters$pos=="2B"),]
+pos2BR=pos2BR[,regressionFeatures]
+```
+
+# Show boxplot of salaries and determine if there are outliers
+```{r}
+pos2BR.removed.outliers=removeOutliers(pos2BR,"Avg.Annual")
+boxplot(list(pos2BR$Avg.Annual,pos2BR.removed.outliers$Avg.Annual),xlab="Salary",names=c("All","Removed Outliers"),main="Salary of 2B (1985-2015)",horizontal=TRUE)
+```
+
+# Normal model for 2b
+#   RMSE     Rsquared   ME       MAE      MPE        MAPE     
+#   2072290  0.5457813  6027.34  1563885  -15.60563  227.9686 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(p2BModel1Error$pred.err.percent.p2BModel1) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.184   34.270   81.300  216.900  246.000 3192.000  
+```{r}
+full=lm(Avg.Annual~.,data=pos2BR)
+null=lm(Avg.Annual~1,data=pos2BR)
+p2BModel1Error=buildAndRunLinearModel(full,null,"Avg.Annual","p2BModel1",pos2BR,modelCtrlLM)
+summary(p2BModel1Error$pred.err.percent.p2BModel1)
+```
+
+# With salary outliers removed for 2b
+#   RMSE     Rsquared  ME        MAE      MPE        MAPE     
+#   1405574  0.518049  12390.53  1112121  -27.75935  168.8912 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(error.model.pos2BR.removed.outliers$pred.err.percent.p2B.removed.outliers) 
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max.  
+#    0.0962   31.1600   73.3000  161.1000  186.2000 1587.0000  
+```{r}
+full=lm(Avg.Annual~.,data=pos2BR.removed.outliers)
+null=lm(Avg.Annual~1,data=pos2BR.removed.outliers)
+error.model.pos2BR.removed.outliers=buildAndRunLinearModel(full,null,"Avg.Annual","p2B.removed.outliers",pos2BR.removed.outliers,modelCtrlLM)
+summary(error.model.pos2BR.removed.outliers$pred.err.percent.p2B.removed.outliers)
+
+```
+
+# Random forest for 2b
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    2127317  0.5328158  -40188.66  1524099  -165.2893  189.0960 
+#    9    1994474  0.5729624  -36399.43  1400455  -132.5753  157.3607 
+#   16    1962461  0.5812930  -41389.05  1371507  -123.6432  148.9246 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 16. 
+# > summary(p2BRfmodelError$pred.err.percent.p2BRfmodel) 
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  
+#    0.13   12.02   26.93   59.55   74.49  474.90  
+```{r}
+p2BRfmodelError=buildAndRunRfModel("Avg.Annual","p2BRfmodel",pos2BR,modelCtrlRF)
+summary(p2BRfmodelError$pred.err.percent.p2BRfmodel)
+
+```
+
+# rANDOM FOREST removed outliers for 2b
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    1519538  0.4514239  -30302.14  1153496  -134.5513  160.3371 
+#    9    1440565  0.5053734  -23827.30  1051736  -107.6368  132.7564 
+#   16    1434474  0.5091674  -20279.64  1035138   -98.7905  124.6600 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 16. 
+# > summary(error.rf.model.pos2BR.removed.outliers$pred.err.percent.p2B.rf.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#   0.1979  10.5600  23.9800  50.1800  61.6600 462.7000  
+```{r}
+error.rf.model.pos2BR.removed.outliers=buildAndRunRfModel("Avg.Annual","p2B.rf.removed.outliers",pos2BR.removed.outliers,modelCtrlRF)
+summary(error.rf.model.pos2BR.removed.outliers$pred.err.percent.p2B.rf.removed.outliers)
+  
+  
+```
+
+# setup data for 3b players
+```{r}
+regressionFeatures=c("Avg.Annual","Year","woba","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
+pos3BR=winningBatters[which(winningBatters$pos=="3B"),]
+pos3BR=pos3BR[,regressionFeatures]
+```
+
+# Show boxplot of salaries and determine if there are outliers
+```{r}
+pos3BR.removed.outliers=removeOutliers(pos3BR,"Avg.Annual")
+
+boxplot(list(pos3BR$Avg.Annual,pos3BR.removed.outliers$Avg.Annual),xlab="Salary",names=c("All","Removed Outliers"),main="Salary of 3B (1985-2015)",horizontal=TRUE)
+```
+
+# Normal model for 3b
+#   RMSE     Rsquared   ME        MAE      MPE       MAPE     
+#   3991364  0.5146184  -11341.8  2905305  59.92536  393.2048 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(p3BModel1Error$pred.err.percent.p3BModel1) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.536   36.230   97.610  367.700  326.800 5989.000  
+```{r}
+full=lm(Avg.Annual~.,data=pos3BR)
+null=lm(Avg.Annual~1,data=pos3BR)
+p3BModel1Error=buildAndRunLinearModel(full,null,"Avg.Annual","p3BModel1",pos3BR,modelCtrlLM)
+summary(p3BModel1Error$pred.err.percent.p3BModel1)
+```
+
+# With salary outliers removed for 3b
+#   RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#   1886593  0.4670419  -9163.871  1467069  -23.95106  203.5158 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(error.model.pos3BR.removed.outliers$pred.err.percent.p3B.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.817   33.020   65.310  198.400  220.300 3261.000  
+```{r}
+full=lm(Avg.Annual~.,data=pos3BR.removed.outliers)
+null=lm(Avg.Annual~1,data=pos3BR.removed.outliers)
+error.model.pos3BR.removed.outliers=buildAndRunLinearModel(full,null,"Avg.Annual","p3B.removed.outliers",pos3BR.removed.outliers,modelCtrlLM)
+summary(error.model.pos3BR.removed.outliers$pred.err.percent.p3B.removed.outliers)
+
+```
+
+# Random forest for 3b
+#   mtry  RMSE     Rsquared   ME          MAE      MPE        MAPE     
+#    2    3931835  0.5274244   -31625.66  2578304  -222.6636  244.5524 
+#    9    3551027  0.5919614  -128913.57  2283713  -151.8158  173.8087 
+#   16    3544142  0.5905724  -103467.99  2269843  -134.4801  158.3332 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 16. 
+# > summary(p3BRfmodelError$pred.err.percent.p3BRfmodel) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#   0.2143  12.5900  27.9300  61.9700  70.9900 593.4000  
+```{r}
+p3BRfmodelError=buildAndRunRfModel("Avg.Annual","p3BRfmodel",pos3BR,modelCtrlRF)
+summary(p3BRfmodelError$pred.err.percent.p3BRfmodel)
+
+```
+
+# rANDOM FOREST removed outliers for 3b
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    1953076  0.4827832  -24152.91  1507740  -172.2417  196.7863 
+#    9    1796763  0.5176729  -25354.37  1325696  -114.3563  138.2963 
+#   16    1827149  0.4965451  -28362.59  1327702  -103.0686  128.5586 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 9. 
+# > summary(error.rf.model.pos3BR.removed.outliers$pred.err.percent.p3B.rf.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#   0.2278  12.7500  27.4900  55.9400  67.7300 429.6000  
+```{r}
+error.rf.model.pos3BR.removed.outliers=buildAndRunRfModel("Avg.Annual","p3B.rf.removed.outliers",pos3BR.removed.outliers,modelCtrlRF)
+summary(error.rf.model.pos3BR.removed.outliers$pred.err.percent.p3B.rf.removed.outliers)
+  
+  
+```
+
+# setup data for OF players
+```{r}
+regressionFeatures=c("Avg.Annual","Year","woba","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
+posOFR=winningBatters[which(winningBatters$pos=="OF"),]
+posOFR=posOFR[,regressionFeatures]
+```
+
+# Show boxplot of salaries and determine if there are outliers
+```{r}
+posOFR.removed.outliers=removeOutliers(posOFR,"Avg.Annual")
+
+boxplot(list(posOFR$Avg.Annual,posOFR.removed.outliers$Avg.Annual),xlab="Salary",names=c("All","Removed Outliers"),main="Salary of OF (1985-2015)",horizontal=TRUE)
+```
+
+# Normal model for OF
+#   RMSE     Rsquared   ME         MAE      MPE       MAPE     
+#   3315255  0.5099765  -597.1713  2450935  20.93352  315.7744 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(pOFModel1Error$pred.err.percent.pOFModel1) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.226   30.480   81.020  310.800  330.000 7258.000  
+```{r}
+full=lm(Avg.Annual~.,data=posOFR)
+null=lm(Avg.Annual~1,data=posOFR)
+pOFModel1Error=buildAndRunLinearModel(full,null,"Avg.Annual","pOFModel1",posOFR,modelCtrlLM)
+summary(pOFModel1Error$pred.err.percent.pOFModel1)
+```
+
+# With salary outliers removed for OF
+#   RMSE     Rsquared   ME        MAE      MPE        MAPE    
+#   2525940  0.5089149  1174.518  1929851  -8.886793  254.453 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(error.model.posOFR.removed.outliers$pred.err.percent.pOF.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.077   31.110   71.900  249.000  292.600 5369.000  
+```{r}
+full=lm(Avg.Annual~.,data=posOFR.removed.outliers)
+null=lm(Avg.Annual~1,data=posOFR.removed.outliers)
+error.model.posOFR.removed.outliers=buildAndRunLinearModel(full,null,"Avg.Annual","pOF.removed.outliers",posOFR.removed.outliers,modelCtrlLM)
+summary(error.model.posOFR.removed.outliers$pred.err.percent.pOF.removed.outliers)
+
+```
+
+# Random forest for OF
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    3355402  0.5298197  -43128.05  2334165  -204.0826  225.6812 
+#    9    3154323  0.5576760  -20919.64  2109599  -131.2266  155.6742 
+#   16    3195145  0.5442133  -17051.10  2115932  -124.1875  150.3024 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 9. 
+# > summary(pOFRfmodelError$pred.err.percent.pOFRfmodel) 
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  
+#    0.12   11.97   25.97   64.53   76.05 1627.00  
+```{r}
+pOFRfmodelError=buildAndRunRfModel("Avg.Annual","pOFRfmodel",posOFR,modelCtrlRF)
+summary(pOFRfmodelError$pred.err.percent.pOFRfmodel)
+
+```
+
+# rANDOM FOREST removed outliers for OF
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    2599785  0.5092330  -41602.95  1919354  -193.4959  216.5522 
+#    9    2445015  0.5386406  -55423.03  1723744  -133.7932  157.9723 
+#   16    2491364  0.5189231  -52435.17  1738016  -127.7762  153.4309 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 9. 
+# > summary(error.rf.model.posOFR.removed.outliers$pred.err.percent.pOF.rf.removed.outliers) 
+#      Min.   1st Qu.    Median      Mean   3rd Qu.      Max.  
+#    0.0427   10.8300   26.8000   63.6200   73.3900 1649.0000  
+```{r}
+error.rf.model.posOFR.removed.outliers=buildAndRunRfModel("Avg.Annual","pOF.rf.removed.outliers",posOFR.removed.outliers,modelCtrlRF)
+summary(error.rf.model.posOFR.removed.outliers$pred.err.percent.pOF.rf.removed.outliers)
+  
+  
+```
+
+# setup data for SS players
+```{r}
+regressionFeatures=c("Avg.Annual","Year","woba","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
+posSSR=winningBatters[which(winningBatters$pos=="SS"),]
+posSSR=posSSR[,regressionFeatures]
+```
+
+# Show boxplot of salaries and determine if there are outliers
+```{r}
+posSSR.removed.outliers=removeOutliers(posSSR,"Avg.Annual")
+boxplot(list(posSSR$Avg.Annual,posSSR.removed.outliers$Avg.Annual),xlab="Salary",names=c("SS","Removed Outliers"),main="Salary of SS (1985-2015)",horizontal=TRUE)
+```
+
+# Normal model for SS
+#   RMSE     Rsquared   ME         MAE      MPE       MAPE     
+#   3030541  0.5458726  -15057.02  2297434  25.24792  327.4557 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(pSSModel1Error$pred.err.percent.pSSModel1) 
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  
+#    0.40   38.98   99.64  311.90  299.30 5095.00  
+```{r}
+full=lm(Avg.Annual~.,data=posSSR)
+null=lm(Avg.Annual~1,data=posSSR)
+pSSModel1Error=buildAndRunLinearModel(full,null,"Avg.Annual","pSSModel1",posSSR,modelCtrlLM)
+summary(pSSModel1Error$pred.err.percent.pSSModel1)
+```
+
+# With salary outliers removed for SS
+#   RMSE     Rsquared   ME        MAE      MPE        MAPE     
+#   1749254  0.5310168  4443.253  1367256  -10.55374  205.2732 
+
+# Tuning parameter 'intercept' was held constant at a value of TRUE 
+# > summary(error.model.posSSR.removed.outliers$pred.err.percent.pSS.removed.outliers) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#    0.144   28.460   75.280  192.800  244.500 3487.000  
+```{r}
+full=lm(Avg.Annual~.,data=posSSR.removed.outliers)
+null=lm(Avg.Annual~1,data=posSSR.removed.outliers)
+error.model.posSSR.removed.outliers=buildAndRunLinearModel(full,null,"Avg.Annual","pSS.removed.outliers",posSSR.removed.outliers,modelCtrlLM)
+summary(error.model.posSSR.removed.outliers$pred.err.percent.pSS.removed.outliers)
+
+```
+
+# Random forest for SS
+#   mtry  RMSE     Rsquared   ME          MAE      MPE        MAPE     
+#    2    2958802  0.6255291   -4453.171  1965279  -204.3876  224.6459 
+#    9    2526136  0.6946028  -88365.920  1628820  -136.6045  157.8509 
+#   16    2495107  0.6952537  -88649.915  1581831  -122.1300  145.4812 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 16. 
+# > summary(pSSRfmodelError$pred.err.percent.pSSRfmodel) 
+#     Min.  1st Qu.   Median     Mean  3rd Qu.     Max.  
+#   0.0544   9.4400  21.9600  55.1800  59.9900 559.1000  
+```{r}
+pSSRfmodelError=buildAndRunRfModel("Avg.Annual","pSSRfmodel",posSSR,modelCtrlRF)
+summary(pSSRfmodelError$pred.err.percent.pSSRfmodel)
+
+```
+
+# rANDOM FOREST removed outliers for SS
+#   mtry  RMSE     Rsquared   ME         MAE      MPE        MAPE     
+#    2    1908341  0.4836230  -24360.24  1380747  -174.5521  197.5533 
+#    9    1717782  0.5488542  -77887.60  1211558  -132.2739  155.1663 
+#   16    1689733  0.5579524  -56759.86  1166022  -117.6027  142.3188 
+
+# RMSE was used to select the optimal model using  the smallest value. 
+# The final value used for the model was mtry = 16. 
+# > summary(error.rf.model.posSSR.removed.outliers$pred.err.percent.pSS.rf.removed.outliers) 
+#    Min. 1st Qu.  Median    Mean 3rd Qu.    Max.  
+#   0.104   8.804  25.500  57.690  62.090 501.800  
+```{r}
+error.rf.model.posSSR.removed.outliers=buildAndRunRfModel("Avg.Annual","pSS.rf.removed.outliers",posSSR.removed.outliers,modelCtrlRF)
+summary(error.rf.model.posSSR.removed.outliers$pred.err.percent.pSS.rf.removed.outliers)
+  
+  
+```
+
+
+
+# Show Regression Results for All players
+# Random forest produced the best model with mean percent error of 50%
+```{r}
+
+summary(pAllModel1Error$pred.err.percent.pAllModel1)
+summary(error.model.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers)
+summary(pAllRfmodelError$pred.err.percent.pAllRfmodel)
+summary(error.rf.model.posAllR.removed.outliers$pred.err.percent.pAll.rf.removed.outliers)
+```
+
+# Summary of regression for C players
+# random forest produced the best model with 45% mean error
+```{r}
+summary(pCModel1Error$pred.err.percent.pCModel1)
+summary(error.model.posCR.removed.outliers$pred.err.percent.pC.removed.outliers)
+summary(pCRfmodelError$pred.err.percent.pCRfmodel)
+summary(error.rf.model.posCR.removed.outliers$pred.err.percent.pC.rf.removed.outliers)
+```
+
+# Summary of regression for 1B players
+# random forest produced the best model with 64% mean error
+```{r}
+summary(p1BModel1Error$pred.err.percent.p1BModel1)
+summary(error.model.pos1BR.removed.outliers$pred.err.percent.1B.removed.outliers)
+summary(p1BRfmodelError$pred.err.percent.p1BRfmodel)
+summary(error.rf.model.pos1BR.removed.outliers$pred.err.percent.p1B.rf.removed.outliers)
+```
+
+# Summary of regression for 2B players
+# random forest produced the best model with 50% mean error
+```{r}
+summary(p2BModel1Error$pred.err.percent.p2BModel1)
+summary(error.model.pos2BR.removed.outliers$pred.err.percent.p2B.removed.outliers)
+summary(p2BRfmodelError$pred.err.percent.p2BRfmodel)
+summary(error.rf.model.pos2BR.removed.outliers$pred.err.percent.p2B.rf.removed.outliers)
+```
+
+# Summary of regression for 3B players
+# random forest produced the best model with 55% mean error
+```{r}
+summary(p3BModel1Error$pred.err.percent.p3BModel1)
+summary(error.model.pos3BR.removed.outliers$pred.err.percent.p3B.removed.outliers)
+summary(p3BRfmodelError$pred.err.percent.p3BRfmodel)
+summary(error.rf.model.pos3BR.removed.outliers$pred.err.percent.p3B.rf.removed.outliers)
+```
+
+# Summary of regression for OF players
+# random forest produced the best model with 63% mean error
+```{r}
+summary(pOFModel1Error$pred.err.percent.pOFModel1)
+summary(error.model.posOFR.removed.outliers$pred.err.percent.pOF.removed.outliers)
+summary(pOFRfmodelError$pred.err.percent.pOFRfmodel)
+summary(error.rf.model.posOFR.removed.outliers$pred.err.percent.pOF.rf.removed.outliers)
+```
+
+# Summary of regression for SS players
+# random forest produced the best model with 55% mean error
+```{r}
+summary(pSSModel1Error$pred.err.percent.pSSModel1)
+summary(error.model.posSSR.removed.outliers$pred.err.percent.pSS.removed.outliers)
+summary(pSSRfmodelError$pred.err.percent.pSSRfmodel)
+summary(error.rf.model.posSSR.removed.outliers$pred.err.percent.pSS.rf.removed.outliers)
+```
+
+

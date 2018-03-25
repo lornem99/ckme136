@@ -12,5 +12,7 @@ player.csv,
 all_star.csv,
 player_award.csv
 
+team.csv, batting.csv, pitching.csv, fielding.csv, salary.csv, usatoday_salary2.csv, player.csv, all_star.csv, player_award.csv, woba.csv
+
 # 2) The project code consists of the following files:
-project_v2.R
+ckme136_project.Rmd

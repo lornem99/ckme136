@@ -1,7 +1,7 @@
 ---
 title: "ckme136_project"
 author: "Lorne Mach"
-date: "March 25, 2018"
+date: "April 6, 2018"
 output:
   word_document: default
 ---
@@ -207,7 +207,7 @@ getOutliers <- function(batters, features) {
 
 # Input: dataframe and features
 # Output: dataframe with outliers removed and replaced with upper fence values
-# Desc: Outliers cause issues with normalization, instead of removing them, substitute the outliers with upper fence values
+# Desc: Outliers cause issues, instead of removing them, substitute the outliers with upper fence values
 
 substituteOutliersWithUpperFence <- function(batters, features) {
   batters_temp=batters
@@ -241,6 +241,31 @@ getModelPredictionError<-function(model,actual,modelName,battersTemp) {
   return(battersTemp)
 }
 
+# Input: Log Model, dataframe, string name of observed value, string name of model
+# Output: Returns dataframe with absolute deviation and percent error of each prediction made for every row in the dataframe
+# Desc: Find the absolute deviation and percent error of each prediction made for every row in the dataframe
+getLogModelPredictionError<-function(model,actual,modelName,battersTemp) {
+  salary.pred.modelName=paste("salary.pred.",modelName,sep="")
+  pred.err.percent.modelName=paste("pred.err.percent.",modelName,sep="")
+  salary.absdev.modelName=paste("salary.absdev.",modelName,sep="")
+  pred.err.percent.inverse.log=paste("pred.err.percent.inverse.log",modelName,sep="")
+  
+  salary.predicted=predict(model,newdata=battersTemp)
+  battersTemp[,c(salary.pred.modelName)]=salary.predicted
+  battersTemp[,c(salary.absdev.modelName)]=abs(log(battersTemp[,c(actual)]) - battersTemp[,c(salary.pred.modelName)])
+    
+  battersTemp[,c(pred.err.percent.modelName)]=
+    abs(battersTemp[,c(salary.absdev.modelName)]/log(battersTemp[,c(actual)])) * 100
+
+    inverse.log.absdev=abs(battersTemp[,c(actual)] - exp(battersTemp[,c(salary.pred.modelName)]))
+
+  battersTemp[,c(pred.err.percent.inverse.log)]=
+    abs(inverse.log.absdev/battersTemp[,c(actual)]) * 100
+  
+  return(battersTemp)
+}
+
+
 # Input: cluster data
 # Desc: Show plot of silhouette method of choosing clusters
 showAvgSilhouette <- function(clusterData) {
@@ -253,16 +278,16 @@ showAvgSilhouette <- function(clusterData) {
     avg_sil_values[k-1]=mean(ss[, 3])
   }
   
-  plot(k.values, avg_sil_values,
+  print(plot(k.values, avg_sil_values,
        type = "b", pch = 19, frame = FALSE, 
        xlab = "Number of clusters K",
-       ylab = "Average Silhouettes")
+       ylab = "Average Silhouettes"))
 }
 
 
 # Input: dataframe and features
-# OUtput: normalized dataframe
-# Desc: REturns a normalized dataframe
+# OUtput: standardized dataframe with mean 0 and standard deviation of 1
+# Desc: REturns a standardized dataframe
 getScaledClusterData<-function(batters, pos, features) {
 
   result=batters
@@ -347,12 +372,39 @@ buildAndRunLinearModel<-function(fullModel,nullModel,responseVar,modelName,model
   sboth=stepAIC(null,direction="both",scope=list(upper=full,lower=null),trace=FALSE)
   
   modelFeatures=attr(sboth$terms,"term.labels")
+  print(modelFeatures)
   model=train(modelData[,modelFeatures],modelData[,responseVar],method='lm',trControl=modelCtrlLM)
   
   print(summary(model$finalModel))
   print(model)
   
+#  par(mfrow = c(2,2))
+  print(plot(model$finalModel))
+#  par(mfrow = c(1,1))
+  
   error=getModelPredictionError(model,responseVar,modelName,modelData)
+  return(error)
+}
+
+# Desc: Perform stepwise AIC to determine best features for linear regression with natural log applied to response variable, using the best features, create a model and run cross validation
+# Output: Error of the regression model produced
+buildAndRunLogModel<-function(fullModel,nullModel,responseVar,modelName,modelData,modelCtrlLM)
+{
+  full=fullModel
+  null=nullModel
+  sboth=stepAIC(null,direction="both",scope=list(upper=full,lower=null),trace=FALSE)
+  
+  modelFeatures=attr(sboth$terms,"term.labels")
+  print(modelFeatures)
+  model=train(modelData[,modelFeatures],log(modelData[,responseVar]),method='lm',trControl=modelCtrlLM)
+  
+  print(summary(model$finalModel))
+  print(model)
+  
+
+  print(plot(model$finalModel))
+
+  error=getLogModelPredictionError(model,responseVar,modelName,modelData)
   return(error)
 }
 
@@ -399,6 +451,13 @@ woba = read.csv("woba.csv")
 fieldingClean=getFieldingClean(fielding)
 ```
 
+#Get winning (playoff) teams from 1985-2015 and show their run scoring metrics
+```{r}
+playoffTeams=getWinningTeams(teams,1984)
+summary(playoffTeams$r)
+hist(playoffTeams$r,xlab="Runs Scored",main="Runs scored by playoff teams")
+```
+
 #Get winning batters from 1985-2015
 ```{r}
 winningBatters=getWinningBatters(teams,woba,batting,fieldingClean,salary,usatodaySalary,player,allstar,award,1984,100)
@@ -409,7 +468,7 @@ winningBatters=getWinningBatters(teams,woba,batting,fieldingClean,salary,usatoda
 ```{r}
 showSummaryStatistics(winningBatters,names(winningBatters))
 
-features=c("Avg.Annual","g","ab","woba","r", "h", "double", "triple", "hr", "rbi", "sb","cs","bb","so","ibb","hbp", "sh","sf","g_idp","po","a","e","age")
+features=c("Avg.Annual","Year","g","ab","woba","r", "h", "double", "triple", "hr", "rbi", "sb","cs","bb","so","ibb","hbp", "sh","sf","g_idp","po","a","e","age")
 battersCor=showBattersCorPlot(winningBatters,features)
 ```
 
@@ -454,7 +513,6 @@ dbClusAll=dbscan(posAllClustering[,c(-1,-2)],eps=2,minPts = 3)
 
 # Density based clustering
 # *** Exceptional players are treated as noise
-# *** The far right of cluster 1 contains a cluster of players.  This corresponds to Cluster 1 from kmeans
 
 # From both kmeans and density based clustering, most of the players are backup are part time players
 ```{r}
@@ -505,7 +563,6 @@ dbClusC=dbscan(posCClustering[,c(-1,-2)],eps=2.15,minPts = 3.5)
 
 # Density based clustering
 # *** Exceptional players are treated as noise
-# *** The far right of cluster 1 contains a cluster of players.  This corresponds to Cluster 1 from kmeans
 
 # From both kmeans and density based clustering, most of the players are backup are part time players
 ```{r}
@@ -636,9 +693,8 @@ dbClus3B=dbscan(pos3BClustering[,c(-1,-2)],eps=2,minPts = 3)
 # *** Cluster 3: Average players
 # *** Cluster 4: Top players
 
-# Density based clustering produces 7 clusters and noise
+# Density based clustering
 # *** Exceptional players are treated as noise 
-# *** Cluster 1 represent the average and part time players in kmeans cluster 2 and 3
 
 ```{r}
 Centers3BTransformed <- t(apply(clus3B$centers, 1, function(r) r * attr(pos3BClustering, 'scaled:scale') + attr(pos3BClustering, 'scaled:center')))
@@ -764,6 +820,42 @@ modelCtrlLM <- trainControl(method='cv', number=10,summaryFunction=modelSummary)
 modelCtrlRF <- trainControl(method='cv', number=5,summaryFunction=modelSummary)
 ```
 
+# Basic Model with most correlated attributes to Avg.Annual
+#  RMSE     Rsquared  ME         MAE      MPE        MAPE    
+#  3437541  0.4473659  -1158.883  2423509  -8.005655  321.2389
+#> summary(basicModelError$pred.err.percent.basicModel)
+#    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+#   0.066   35.720   95.430  319.500  357.600 7874.000 
+```{r}
+basicModelData=winningBatters[which(winningBatters$pos!="P"),names(which(abs(battersCor[1,]) > .2))]
+basicModel=train(basicModelData[,-1],basicModelData[,"Avg.Annual"],method='lm',trControl=modelCtrlLM)
+  
+summary(basicModel$finalModel)
+basicModel
+  
+basicModelError=getModelPredictionError(basicModel,"Avg.Annual","basicModel",basicModelData)
+summary(basicModelError$pred.err.percent.basicModel)
+```
+
+# Removed outliers from base model
+#  RMSE     Rsquared   ME         MAE      MPE       MAPE    
+#  1992829  0.4294602  -777.6134  1529543  -58.7159  207.4768
+#Tuning parameter 'intercept' was held constant at a value of TRUE
+#> summary(remove.outliers.basicModelError$pred.err.percent.basicModel)
+#    Min.  1st Qu.   Median     Mean  3rd Qu.     Max. 
+#   0.069   34.460   72.260  205.600  263.200 3989.000 
+```{r}
+remove.outliers.basicModelData=removeOutliers(basicModelData,"Avg.Annual")
+remove.outliers.basicModel=train(remove.outliers.basicModelData[,-1],remove.outliers.basicModelData[,"Avg.Annual"],method='lm',trControl=modelCtrlLM)
+  
+summary(remove.outliers.basicModel$finalModel)
+remove.outliers.basicModel
+  
+remove.outliers.basicModelError=getModelPredictionError(remove.outliers.basicModel,"Avg.Annual","basicModel",remove.outliers.basicModelData)
+summary(remove.outliers.basicModelError$pred.err.percent.basicModel)
+
+```
+
 # Setup and populate data frame for regression model analysis of all players
 ```{r}
 regressionFeatures=c("Avg.Annual","Year","woba","pos","po","a","e","g","ab","r","h","double","triple","hr","rbi","sb","cs","bb","so","ibb","hbp","sh","sf","g_idp","isAllStar","isAwardWinner","hasFreeAgentStatus","ageUnder25","age25to30","age30to35","age35to50","single")
@@ -844,6 +936,37 @@ error.rf.model.posAllR.removed.outliers=buildAndRunRfModel("Avg.Annual","pAll.rf
 summary(error.rf.model.posAllR.removed.outliers$pred.err.percent.pAll.rf.removed.outliers)
   
   
+```
+
+# LOg Model with all players
+#  RMSE       Rsquared   ME           MAE        MPE         MAPE   
+#  0.7515036  0.7126979  0.000634206  0.6021686  -0.2748782  4.28641
+#> summary(pAllLogModelError$pred.err.percent.pAllLogModel)
+#     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+# 0.001651  1.739000  3.570000  4.240000  6.007000 22.360000 
+```{r}
+full=lm(log(Avg.Annual)~.,data=posAllR)
+null=lm(log(Avg.Annual)~1,data=posAllR)
+
+pAllLogModelError=buildAndRunLogModel(full,null,"Avg.Annual","pAllLogModel",posAllR,modelCtrlLM)
+summary(pAllLogModelError$pred.err.percent.pAllLogModel)
+```
+
+# log model with all players outliers removed
+#  RMSE      Rsquared   ME             MAE        MPE         MAPE    
+#  0.737453  0.6579692  -0.0008227853  0.5903064  -0.2837138  4.250062
+#Tuning parameter 'intercept' was held constant at a value of TRUE
+#> summary(error.logmodel.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers)
+#     Min.   1st Qu.    Median      Mean   3rd Qu.      Max. 
+# 0.001393  1.715000  3.539000  4.207000  6.037000 21.700000 
+```{r}
+# Salary is right skewed, qqplot from the linear regression model shows the residuals are heavy-tailed
+hist(posAllR.removed.outliers$Avg.Annual,xlab="Salary",main="Players salary (right skewed)")
+
+full=lm(log(Avg.Annual)~.,data=posAllR.removed.outliers)
+null=lm(log(Avg.Annual)~1,data=posAllR.removed.outliers)
+error.logmodel.posAllR.removed.outliers=buildAndRunLogModel(full,null,"Avg.Annual","pAll.removed.outliers",posAllR.removed.outliers,modelCtrlLM)
+summary(error.logmodel.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers)
 ```
 
 # Populate data for catchers
@@ -1324,7 +1447,28 @@ summary(error.rf.model.posSSR.removed.outliers$pred.err.percent.pSS.rf.removed.o
   
 ```
 
+# Regression results for base model
+# Base model average percent error is about 205%
+```{r}
+summary(basicModelError$pred.err.percent.basicModel)
+summary(remove.outliers.basicModelError$pred.err.percent.basicModel)
+```
 
+# Log Model with salary outliers
+# Avg Error Percent is 4.2%
+```{r}
+summary(pAllLogModelError$pred.err.percent.pAllLogModel)
+hist(error.logmodel.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers,breaks=c(0,3,6,9,12,15,18,21,24,27),xlab="Percent Error",ylab="Number of Players",main="Salary Prediction % Error")
+summary(pAllLogModelError$pred.err.percent.inverse.logpAllLogModel)
+```
+
+# Log Model with salary outliers removed
+# Avg Error Percent is 4.2%
+```{r}
+summary(error.logmodel.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers)
+hist(error.logmodel.posAllR.removed.outliers$pred.err.percent.pAll.removed.outliers,breaks=c(0,3,6,9,12,15,18,21,24,27),xlab="Percent Error",ylab="Number of Players",main="Salary Prediction % Error")
+summary(error.logmodel.posAllR.removed.outliers$pred.err.percent.inverse.logpAll.removed.outliers)
+```
 
 # Show Regression Results for All players
 # Random forest produced the best model with mean percent error of 50%

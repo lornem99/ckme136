@@ -1,4 +1,4 @@
-# (Evaluating Baseball Players, Performance, and Salaries - CKME 136 Data Analytics: Capstone Course)
+# (Evaluating Skills, Performance, and Salaries of Baseball Players - CKME 136 Data Analytics: Capstone Course)
 # The project code requires the following csv files.
 # The R code will read the files and produce a consolidated dataset that is used for analysis
 

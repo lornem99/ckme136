@@ -16,3 +16,6 @@ woba.csv
 
 # 2) The project code consists of the following files:
 ckme136_project.Rmd
+
+# 3) The Rmarkdown knitted document is this file:
+ckme136_project.docx
